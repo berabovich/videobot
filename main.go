@@ -1,151 +1,95 @@
 package main
 
 import (
+	"awesomeProject1/app"
+	"awesomeProject1/models"
+	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"github.com/PuerkitoBio/goquery"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"strconv"
-	"strings"
-	"unicode"
 )
 
-var quary = "робинзон"
-
-type Films struct {
-	LinkText string `json:"Название"`
-	Link     string `json:"Ссылка"`
-}
-type FilmsData struct {
-	Films []Films
-}
-
-func linkScrape() []Films {
-	quStr := strings.ReplaceAll(quary, " ", "+")
-	doc, err := goquery.NewDocument("https://www.kinopoisk.ru/index.php?kp_query=" + quStr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var films []Films
-	doc.Find("body a").Each(func(index int, item *goquery.Selection) {
-		var film Films
-		linkTag := item
-		link, _ := linkTag.Attr("href")
-		linkText := linkTag.Text()
-		quarySplit := strings.Split(quary, " ")
-		linkTextSplit := strings.Split(linkText, " ")
-		for _, q := range quarySplit {
-			for _, l := range linkTextSplit {
-				if strings.EqualFold(l, q) && strings.Contains(link, "film") {
-					link = strings.ReplaceAll(link, "/sr/1/", "")
-					sp := strings.Split(link, "/")
-					if len(sp) < 4 && sp[1] == "film" {
-						link = "https://www.kinopoiskk.ru" + link
-						film.LinkText = linkText
-						film.Link = link
-						films = append(films, film)
-					}
-
-				}
-			}
-		}
-
-	})
-	return films
-}
-
 func main() {
-	films := controller()
-	rawDataOut, err := json.MarshalIndent(films, "", "  ")
-	if err != nil {
-		log.Fatal("JSON marshaling failed:", err)
-	}
-	if films.Films == nil {
-		fmt.Println("Фильмы не найдены")
-	} else {
-		fmt.Println(string(rawDataOut))
-	}
-}
-
-func controller() FilmsData {
-	var fd FilmsData
-	if IsEngByLoop(quary) {
-		return fd
-	}
-	fd = readFile(&fd, quary)
-	if fd.Films == nil {
-		f := linkScrape()
-		fd.Films = f
-		writeFile(fd)
-		return fd
-	}
-	return fd
-}
-
-func IsEngByLoop(str string) bool {
-	if _, err := strconv.Atoi(str); err == nil {
-		return false
-	}
-	for i := 0; i < len(str); i++ {
-		if str[i] > unicode.MaxASCII {
-			return false
+	botApi := "https://api.telegram.org/bot"
+	botUrl := botApi + mustToken()
+	offset := 0
+	for {
+		updates, err := getUpdates(botUrl, offset)
+		if err != nil {
+			log.Panicln("Smth went wrong: ", err.Error())
 		}
+		for _, update := range updates {
+			err = respond(botUrl, update)
+			offset = update.UpdateId + 1
+
+		}
+		fmt.Println(updates)
 	}
-	return true
 }
 
-func readFile(m *FilmsData, quary string) FilmsData {
-	rawDataIn, _ := ioutil.ReadFile("films.json")
-	_ = json.Unmarshal(rawDataIn, &m)
-	var fd FilmsData
-	var fd2 FilmsData
-	for _, j := range m.Films {
-		quarySplit := strings.Split(quary, " ")
-		linkTextSplit := strings.Split(j.LinkText, " ")
-		for _, q := range quarySplit {
-			for _, t := range linkTextSplit {
-				if strings.EqualFold(q, t) {
-					fd.Films = append(fd.Films, j)
-					break
-				}
-			}
-			if fd.Films != nil {
-				break
-			}
-		}
-	}
+func mustToken() string {
+	token := flag.String(
+		"botToken",
+		"",
+		"token for access to telegram bot",
+	)
+	flag.Parse()
 
-	if len(strings.Split(quary, " ")) > 1 {
-		for i, _ := range strings.Split(quary, " ") {
-			i++
-			for j, f := range fd.Films {
-				if strings.Contains(f.LinkText, strings.Split(quary, " ")[i]) {
-					fd2.Films = append(fd2.Films, fd.Films[j])
-				}
-			}
-			break
-		}
-		return fd2
+	if *token == "" {
+		log.Fatal("token is not specified")
 	}
-
-	return fd
+	return *token
 }
 
-func writeFile(m FilmsData) {
-	var data FilmsData
-	rawDataIn, _ := ioutil.ReadFile("films.json")
-	_ = json.Unmarshal(rawDataIn, &data)
-	for _, j := range data.Films {
-		m.Films = append(m.Films, j)
-	}
-	rawDataOut, err := json.MarshalIndent(m, "", "  ")
+func getUpdates(botUrl string, offset int) ([]models.Update, error) {
+	resp, err := http.Get(botUrl + "/getUpdates" + "?offset=" + strconv.Itoa(offset))
 	if err != nil {
-		log.Fatal("JSON marshaling failed:", err)
+		return nil, err
 	}
-	err = ioutil.WriteFile("films.json", rawDataOut, 0644)
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal("Cannot write updated file:", err)
+		return nil, err
 	}
+	var restResponse models.RestResponse
+	err = json.Unmarshal(body, &restResponse)
+	if err != nil {
+		return nil, err
+	}
+	return restResponse.Result, nil
+}
+
+func respond(botUrl string, update models.Update) error {
+	var botMessage models.BotMessage
+	botMessage.ChatId = update.Message.Chat.ChatId
+	msg := app.Controller(update.Message.Text)
+	if msg.Films == nil {
+		botMessage.Text = "Фильмы не найдены"
+		buf, err := json.Marshal(botMessage)
+		if err != nil {
+			return err
+		}
+		_, err = http.Post(botUrl+"/sendMessage", "application/json", bytes.NewBuffer(buf))
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	for _, j := range msg.Films {
+		botMessage.Text = botMessage.Text + j.LinkText + "\n"
+		botMessage.Text = botMessage.Text + j.Link + "\n"
+	}
+	buf, err := json.Marshal(botMessage)
+	if err != nil {
+		return err
+	}
+	_, err = http.Post(botUrl+"/sendMessage", "application/json", bytes.NewBuffer(buf))
+	if err != nil {
+		return err
+	}
+	return nil
 }
